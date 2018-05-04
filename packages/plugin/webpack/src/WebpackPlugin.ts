@@ -1,5 +1,7 @@
 import { asyncOra } from '@electron-forge/async-ora';
 import PluginBase from '@electron-forge/plugin-base';
+import Logger from '@electron-forge/web-multi-logger';
+import Tab from '@electron-forge/web-multi-logger/dist/Tab';
 import fs from 'fs-extra';
 import merge from 'webpack-merge';
 import path from 'path';
@@ -57,6 +59,9 @@ export default class WebpackPlugin extends PluginBase<WebpackPluginConfig> {
 
     const defines: { [key: string]: string; } = {};
     let index = 0;
+    if (!this.config.renderer.entryPoints || !Array.isArray(this.config.renderer.entryPoints)) {
+      throw new Error('Required config option "renderer.entryPoints" has not been defined');
+    }
     for (const entryPoint of this.config.renderer.entryPoints) {
       defines[`${entryPoint.name.toUpperCase().replace(/ /g, '_')}_WEBPACK_ENTRY`] =
         this.isProd
@@ -78,6 +83,13 @@ export default class WebpackPlugin extends PluginBase<WebpackPluginConfig> {
       node: {
         __dirname: false,
         __filename: false,
+      },
+      resolve: {
+        modules: [
+          path.resolve(path.dirname(this.baseDir), './'),
+          path.resolve(path.dirname(this.baseDir), 'node_modules'),
+          path.resolve(__dirname, '..', 'node_modules'),
+        ],
       },
     }, mainConfig || {});
   }
@@ -108,10 +120,20 @@ export default class WebpackPlugin extends PluginBase<WebpackPluginConfig> {
     }, rendererConfig);
   }
 
-  compileMain = async () => {
+  compileMain = async (logger?: Logger) => {
+    let tab: Tab;
+    if (logger) {
+      tab = logger.createTab('Main Process');
+    }
     await asyncOra('Compiling Main Process Code', async () => {
       await new Promise(async (resolve, reject) => {
         webpack(await this.getMainConfig()).run((err, stats) => {
+          if (tab) {
+            tab.log(stats.toString({
+              colors: true,
+            }));
+          }
+
           if (err) return reject(err);
           resolve();
         });
@@ -132,21 +154,28 @@ export default class WebpackPlugin extends PluginBase<WebpackPluginConfig> {
     }
   }
 
-  launchDevServers = async () => {
+  launchDevServers = async (logger: Logger) => {
     await asyncOra('Launch Dev Servers', async () => {
       let index = 0;
       for (const entryPoint of this.config.renderer.entryPoints) {
+        const tab = logger.createTab(entryPoint.name);
+
         const config = await this.getRendererConfig(entryPoint);
         const compiler = webpack(config);
         const server = webpackDevMiddleware(compiler, {
-          logLevel: 'silent',
+          logger: {
+            log: tab.log.bind(tab),
+            info: tab.log.bind(tab),
+            error: tab.log.bind(tab),
+            warn: tab.log.bind(tab),
+          },
           publicPath: '/',
           hot: true,
           historyApiFallback: true,
         } as any);
         const app = express();
         app.use(server);
-        app.use(webpackHotMiddleware(compiler))
+        app.use(webpackHotMiddleware(compiler));
         app.listen(BASE_PORT + index);
         index += 1;
       }
@@ -154,8 +183,10 @@ export default class WebpackPlugin extends PluginBase<WebpackPluginConfig> {
   }
 
   async startLogic(): Promise<false> {
-    await this.compileMain();
-    await this.launchDevServers();
+    const logger = new Logger();
+    await this.compileMain(logger);
+    await this.launchDevServers(logger);
+    await logger.start();
     return false;
   }
 }
